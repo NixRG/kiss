@@ -359,7 +359,7 @@ pkg_extract() {
 pkg_depends() {
     # Resolve all dependencies and generate an ordered list. The deepest
     # dependencies are listed first and then the parents in reverse order.
-    contains "$deps" "$1" || {
+    [ -f "$dat_dir/depends/$1" ] || {
         # Filter out non-explicit, aleady installed dependencies.
         case $3-$2 in
             *?-) pkg_list "$1" >/dev/null 2>&1 && return 0
@@ -384,7 +384,18 @@ pkg_depends() {
 
         # After child dependencies are added to the list,
         # add the package which depends on them.
-        [ "$2" = explicit ] || deps="$deps $1 "
+        case $2 in
+            explicit)
+                : > "$dat_dir/explicit/$1"
+            ;;
+
+            *)
+                : > "$dat_dir/depends/$1"
+
+                # Cannot use files, must be ordered.
+                printf '%s\n' "$1" >> "$dat_dir/list"
+            ;;
+        esac
     }
 }
 
@@ -564,34 +575,25 @@ pkg_tar() (
 )
 
 pkg_build() {
-    # Mark packages passed on the command-line separately from those
-    # detected as dependencies. We need to treat explicitly passed packages
-    # differently from those pulled in as dependencies.
-    #
-    # This also resolves all dependencies and stores the result in '$deps'.
-    # Any duplicates are also filtered out.
+    mkdir -p "$dat_dir/depends" "$dat_dir/explicit"
+
     for pkg do
-        contains "$explicit" "$pkg" || {
-            pkg_depends "$pkg" explicit filter
-            explicit="$explicit $pkg "
+        pkg_depends "$pkg" explicit filter
+
+        [ -f "$dat_dir/depends/$pkg" ] && {
+            rm -f "$dat_dir/explicit/$pkg"
+            shift
         }
     done
 
-    # If this is an update, don't always build explicitly passsed packages
-    # and instead install pre-built binaries if they exist.
-    [ "$pkg_update" ] || explicit_build=$explicit
+    [ "$pkg_update" ] || ln -sf "$dat_dir/explicit" "$dat_dir/build"
 
-    # If an explicit package is a dependency of another explicit package,
-    # remove it from the explicit list as it needs to be installed as a
-    # dependency.
-    for pkg do
-        contains "$deps" "$pkg" || explicit2=" $explicit2 $pkg "
-    done
-    explicit=$explicit2
+    printf '%s\n' "$@" >> "$dat_dir/list"
+    set --
 
-    # See [1] at top of script.
-    # shellcheck disable=2046,2086
-    set -- $deps $explicit
+    while read -r line; do
+        contains "$*" "$line" || set -- "$@" "$line"
+    done < "$dat_dir/list"
 
     # Only ask for confirmation if more than one package needs to be built.
     [ "$#" -gt 1 ] || [ "$pkg_update" ] && prompt "Building: $*"
@@ -603,7 +605,7 @@ pkg_build() {
     # Install any pre-built dependencies if they exist in the binary
     # directory and are up to date.
     for pkg do
-        ! contains "$explicit_build" "$pkg" && pkg_cache "$pkg" && {
+        ! [ -f "$dat_dir/build/$pkg" ] && pkg_cache "$pkg" && {
             log "$pkg" "Installing binary from cache"
             (KISS_FORCE=1 args i "$tar_file")
 
@@ -682,7 +684,7 @@ pkg_build() {
 
         # Install only dependencies of passed packages. If this is an update,
         # install the built package regardless.
-        contains "$explicit" "$pkg" && [ -z "$pkg_update" ] && continue
+        [ -f "$dat_dir/explicit/$pkg" ] && [ -z "$pkg_update" ] && continue
 
         log "$pkg" "Needed as a dependency or has an update, installing"
         (KISS_FORCE=1 args i "$pkg")
@@ -1374,8 +1376,12 @@ pkg_updates() {
 }
 
 pkg_clean() {
-    # Clean up on exit or error. This removes everything related to the build.
-    [ "$KISS_DEBUG" = 1 ] || rm -rf "$mak_dir" "$pkg_dir" "$tar_dir"
+    [ "$KISS_DEBUG" = 1 ] ||
+        rm -rf \
+            "$mak_dir" \
+            "$pkg_dir" \
+            "$tar_dir" \
+            "$dat_dir"
 }
 
 args() {
@@ -1603,6 +1609,7 @@ main() {
         "${mak_dir:="${KISS_TMPDIR:="$cac_dir"}/build-$pid"}" \
         "${pkg_dir:="${KISS_TMPDIR:="$cac_dir"}/pkg-$pid"}" \
         "${tar_dir:="${KISS_TMPDIR:="$cac_dir"}/extract-$pid"}" \
+        "${dat_dir:="${KISS_TMPDIR:="$cac_dir"}/data-$pid"}" \
         "${src_dir:="$cac_dir/sources"}" \
         "${log_dir:="$cac_dir/logs"}" \
         "${bin_dir:="$cac_dir/bin"}"
